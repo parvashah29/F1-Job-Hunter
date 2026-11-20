@@ -1,0 +1,280 @@
+# ============================================================
+# F-1 Job Hunter Agent — Central Configuration
+# Edit this file to customize your search without touching code
+# ============================================================
+
+# ----- AI Settings -----
+ai:
+  model: "llama3.2"          # Change to "mistral" for deeper analysis
+  timeout_seconds: 45
+  max_description_chars: 4000  # Truncate long JDs before sending to LLM
+
+# ----- Schedule -----
+schedule_time: "19:00"  # 7:00 PM daily
+
+# ----- Email Delivery -----
+# Credentials are loaded from .env (never store passwords here)
+# See README for Gmail App Password setup instructions
+email:
+  enabled: true
+  smtp_host: "smtp.gmail.com"
+  smtp_port: 587
+  # sender_email and app_password come from .env file
+  recipient_email: "sparva078@gmail.com"         # ← Fill in: your email address (can be same as sender)
+  subject_template: "🔥 F-1 Job Digest — {date} | {total} new jobs ({ats} ATS · {bigtech} BigTech)"
+  include_attachments: true   # Attach the raw .md files as well
+  include_bigtech: true       # Include Track B section in the email
+  include_ats: true           # Include Track A section in the email
+
+
+# ----- Your Profile (used to personalize AI prompt) -----
+profile:
+  graduation_year: 2027
+  graduation_month: "May"
+  status: "F-1 OPT"
+  degree: "Master's"          # or "Bachelor's" — adjust as needed
+
+# ----- Role Keywords by Tier -----
+# Used for title-based pre-filtering before AI analysis
+roles:
+  tier1:
+    - "Data Scientist"
+    - "Associate Data Scientist"
+    - "Junior Data Scientist"
+    - "New Grad Data Scientist"
+    - "Data Engineer"
+    - "Associate Data Engineer"
+    - "Junior Data Engineer"
+    - "New Grad Data Engineer"
+    - "Machine Learning Engineer"
+    - "Associate Machine Learning Engineer"
+    - "Junior Machine Learning Engineer"
+    - "AI Engineer"
+    - "Applied AI Engineer"
+    - "Software Engineer"
+    - "Associate Software Engineer"
+    - "New Grad Software Engineer"
+    - "Software Developer"
+    - "Backend Software Engineer"
+    - "AI Software Engineer"
+
+  tier2:
+    - "Analytics Engineer"
+    - "Data Analyst"
+    - "Product Data Analyst"
+    - "Business Intelligence Analyst"
+    - "Business Intelligence Engineer"
+    - "Decision Scientist"
+    - "Applied Scientist"
+    - "Research Engineer"
+    - "Computer Vision Engineer"
+    - "MLOps Engineer"
+    - "AI Platform Engineer"
+    - "ML Platform Engineer"
+    - "Data Platform Engineer"
+    - "Cloud Data Engineer"
+    - "Big Data Engineer"
+
+  tier3:
+    - "AI Developer"
+    - "Machine Learning Developer"
+    - "Data Analytics Engineer"
+    - "AI Solutions Engineer"
+    - "AI Consultant"
+    - "Data Consultant"
+    - "Cloud Engineer"
+    - "Python Developer"
+    - "Backend Engineer"
+    - "Full Stack Engineer"
+    - "Software Development Engineer"
+    - "SDE I"
+    - "SDE-I"
+    - "Systems Engineer"
+    - "Quantitative Analyst"
+    - "Operations Research Analyst"
+
+  early_career_keywords:
+    - "New Grad"
+    - "University Graduate"
+    - "University Hire"
+    - "University Recruiting"
+    - "Campus Hire"
+    - "Graduate Program"
+    - "Graduate Engineer"
+    - "Graduate Software Engineer"
+    - "Graduate Data Scientist"
+    - "Graduate Data Engineer"
+    - "Early Career"
+    - "Early Talent"
+    - "Entry Level"
+    - "Associate"
+    - "Level I"
+    - "Engineer I"
+    - "SDE I"
+
+  company_specific:
+    - "University Graduate"
+    - "AI Residency"
+    - "Machine Learning Residency"
+    - "Technology Development Program"
+    - "Technology Analyst Program"
+    - "Engineering Rotational Program"
+    - "Data Science Rotational Program"
+    - "AI Rotational Program"
+    - "Software Engineering Rotational Program"
+
+# Primary search query terms used in URL construction for Track B
+# (Shorter, optimized for search boxes)
+search_queries:
+  - "data scientist new grad"
+  - "machine learning engineer new grad"
+  - "data engineer new grad"
+  - "software engineer university graduate"
+  - "AI engineer entry level"
+  - "applied scientist"
+  - "analytics engineer"
+  - "university graduate data"
+
+# ----- Track A: ATS/Aggregator Scraper (Greenhouse & Lever JSON APIs) -----
+track_a:
+  # Companies using Greenhouse ATS — verified live as of July 2026
+  # API: https://boards-api.greenhouse.io/v1/boards/{slug}/jobs
+  greenhouse_companies:
+    # ── Big AI Labs ──────────────────────────────────────────────────────
+    - { slug: "anthropic",    name: "Anthropic" }        # 411 jobs
+    - { slug: "databricks",   name: "Databricks" }       # 789 jobs
+    - { slug: "scaleai",      name: "Scale AI" }         # 191 jobs
+    # ── Ride-share / Mobility ─────────────────────────────────────────
+    - { slug: "lyft",         name: "Lyft" }
+    - { slug: "waymo",        name: "Waymo" }            # 402 jobs
+    - { slug: "samsara",      name: "Samsara" }          # 337 jobs
+    # ── Consumer Tech / Social ────────────────────────────────────────
+    - { slug: "airbnb",       name: "Airbnb" }
+    - { slug: "coinbase",     name: "Coinbase" }
+    - { slug: "discord",      name: "Discord" }
+    - { slug: "doordash",     name: "DoorDash" }
+    - { slug: "duolingo",     name: "Duolingo" }
+    - { slug: "roblox",       name: "Roblox" }           # 229 jobs
+    - { slug: "twitch",       name: "Twitch" }
+    - { slug: "pinterest",    name: "Pinterest" }
+    - { slug: "reddit",       name: "Reddit" }
+    - { slug: "robinhood",    name: "Robinhood" }
+    # ── Dev Tools / Infra ────────────────────────────────────────────
+    - { slug: "figma",        name: "Figma" }
+    - { slug: "notion",       name: "Notion" }
+    - { slug: "vercel",       name: "Vercel" }           # 71 jobs
+    - { slug: "airtable",     name: "Airtable" }
+    - { slug: "contentful",   name: "Contentful" }
+    - { slug: "mixpanel",     name: "Mixpanel" }
+    - { slug: "gitlab",       name: "GitLab" }
+    - { slug: "elastic",      name: "Elastic" }
+    - { slug: "datadog",      name: "Datadog" }
+    - { slug: "cloudflare",   name: "Cloudflare" }
+    - { slug: "pagerduty",    name: "PagerDuty" }
+    # ── SaaS / Enterprise ────────────────────────────────────────────
+    - { slug: "hubspot",      name: "HubSpot" }
+    - { slug: "intercom",     name: "Intercom" }
+    - { slug: "zendesk",      name: "Zendesk" }         # verify if broken
+    - { slug: "zoom",         name: "Zoom" }            # verify if broken
+    - { slug: "twilio",       name: "Twilio" }
+    - { slug: "asana",        name: "Asana" }
+    - { slug: "gusto",        name: "Gusto" }
+    - { slug: "lattice",      name: "Lattice" }
+    - { slug: "qualtrics",    name: "Qualtrics" }
+    - { slug: "faire",        name: "Faire" }
+    - { slug: "checkr",       name: "Checkr" }
+    # ── Data / DB ────────────────────────────────────────────────────
+    - { slug: "mongodb",      name: "MongoDB" }
+    - { slug: "snowflake",    name: "Snowflake" }        # verify if broken
+    - { slug: "amplitude",    name: "Amplitude" }
+    - { slug: "segment",      name: "Segment" }          # verify if broken
+    - { slug: "coreweave",    name: "CoreWeave" }        # 283 jobs ✅
+    - { slug: "fivetran",     name: "Fivetran" }         # 172 jobs ✅
+    - { slug: "clickhouse",   name: "ClickHouse" }       # 172 jobs ✅
+    - { slug: "starburst",    name: "Starburst" }        # 15 jobs ✅
+    - { slug: "dremio",       name: "Dremio" }           # 6 jobs ✅
+    - { slug: "labelbox",     name: "Labelbox" }         # 14 jobs ✅
+    # ── Fintech ──────────────────────────────────────────────────────
+    - { slug: "stripe",       name: "Stripe" }
+    - { slug: "plaid",        name: "Plaid" }            # verify if broken
+    - { slug: "brex",         name: "Brex" }
+    - { slug: "carta",        name: "Carta" }
+    - { slug: "rippling",     name: "Rippling" }         # verify if broken
+    - { slug: "toast",        name: "Toast" }            # 298 jobs ✅
+    - { slug: "marqeta",      name: "Marqeta" }          # 40 jobs ✅
+    # ── Biotech / Other ──────────────────────────────────────────────
+    - { slug: "benchling",    name: "Benchling" }        # verify if broken
+    - { slug: "chime",        name: "Chime" }
+    - { slug: "palantir",     name: "Palantir" }         # verify if broken
+    - { slug: "okta",         name: "Okta" }
+    - { slug: "rubrik",       name: "Rubrik" }
+
+  # Companies using Lever ATS — verified live slugs only
+  # API: https://api.lever.co/v0/postings/{slug}?mode=json
+  lever_companies:
+    - { slug: "anyscale",     name: "Anyscale" }
+
+  max_jobs_per_company: 10
+
+# ----- Track B: Big Tech Direct Career Pages (Playwright) -----
+track_b:
+  companies:
+    - name: "Meta"
+      base_url: "https://www.metacareers.com"
+      search_url: "https://www.metacareers.com/jobs/?q=university+graduate+data+scientist&offices[0]=United+States"
+      type: "playwright"
+
+    - name: "Amazon"
+      base_url: "https://www.amazon.jobs"
+      search_url: "https://www.amazon.jobs/en/search?base_query=new+grad+data+scientist&loc_query=United+States&sort=relevant"
+      type: "playwright"
+
+    - name: "Google"
+      base_url: "https://careers.google.com"
+      search_url: "https://careers.google.com/jobs/results/?q=university+graduate+data+scientist&location=United+States"
+      type: "playwright"
+
+    - name: "Microsoft"
+      base_url: "https://jobs.microsoft.com"
+      search_url: "https://jobs.microsoft.com/us/en/search?keywords=data+scientist+new+grad&experience=University+Graduates"
+      type: "playwright"
+
+    - name: "Apple"
+      base_url: "https://jobs.apple.com"
+      search_url: "https://jobs.apple.com/en-us/search?search=new+grad+data+scientist&sort=relevance"
+      type: "playwright"
+
+    - name: "NVIDIA"
+      base_url: "https://nvidia.wd5.myworkdayjobs.com"
+      search_url: "https://nvidia.wd5.myworkdayjobs.com/NVIDIAExternalCareerSite?q=new+grad+data+scientist"
+      type: "playwright"
+
+    - name: "Netflix"
+      base_url: "https://jobs.netflix.com"
+      search_url: "https://jobs.netflix.com/search?q=data+scientist+new+grad"
+      type: "playwright"
+
+    - name: "OpenAI"
+      base_url: "https://openai.com"
+      search_url: "https://openai.com/careers/"
+      type: "playwright"
+
+    - name: "Salesforce"
+      base_url: "https://careers.salesforce.com"
+      search_url: "https://careers.salesforce.com/en/jobs/?search=data+scientist+new+grad&country=United+States"
+      type: "playwright"
+
+    - name: "Adobe"
+      base_url: "https://careers.adobe.com"
+      search_url: "https://careers.adobe.com/us/en/search-results?keywords=data+scientist+new+grad"
+      type: "playwright"
+
+  max_jobs_per_company: 15
+  page_load_timeout: 30000   # ms
+  min_delay_seconds: 2       # minimum delay between page navigations
+  max_delay_seconds: 5       # maximum delay (randomized for anti-bot)
+
+# ----- Limits -----
+limits:
+  track_a_report_max: 25    # Max jobs in daily_jobs report
+  track_b_report_max: 30    # Max jobs in bigtech_jobs report (all qualifying shown)

@@ -1,0 +1,10 @@
+[
+ {"text": "Applied AI Engineer", "hostedUrl": "https://jobs.lever.co/beta/aaa",
+  "categories": {"location": "San Francisco, CA"},
+  "descriptionPlain": "Build things.", "lists": [{"text": "Requirements", "content": "<li>Python</li><li>Must be a U.S. citizen</li>"}],
+  "additionalPlain": ""},
+ {"text": "Backend Engineer", "hostedUrl": "https://jobs.lever.co/beta/bbb",
+  "categories": {"location": "Remote - Canada"}, "descriptionPlain": "Nice.", "lists": []},
+ {"text": "Python Developer", "hostedUrl": "https://jobs.lever.co/beta/ccc",
+  "categories": {"location": "Remote - US"}, "descriptionPlain": "Python all day.", "lists": []}
+]

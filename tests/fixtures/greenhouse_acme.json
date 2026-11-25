@@ -1,0 +1,22 @@
+{"jobs": [
+ {"id": 1, "title": "Data Scientist, Growth", "absolute_url": "https://boards.greenhouse.io/acme/jobs/1",
+  "location": {"name": "Remote - US"},
+  "content": "&lt;p&gt;Join us. 0-2 years of experience. We offer visa sponsorship for qualified candidates.&lt;/p&gt;"},
+ {"id": 2, "title": "Senior Data Scientist", "absolute_url": "https://boards.greenhouse.io/acme/jobs/2",
+  "location": {"name": "New York, NY"}, "content": "&lt;p&gt;Lead things.&lt;/p&gt;"},
+ {"id": 3, "title": "Software Engineer, New Grad", "absolute_url": "https://boards.greenhouse.io/acme/jobs/3",
+  "location": {"name": "Hybrid - New York"},
+  "content": "&lt;p&gt;Note: we are unable to provide visa sponsorship for this role.&lt;/p&gt;"},
+ {"id": 4, "title": "Data Engineer", "absolute_url": "https://boards.greenhouse.io/acme/jobs/4",
+  "location": {"name": "London, UK"}, "content": "&lt;p&gt;Great job&lt;/p&gt;"},
+ {"id": 5, "title": "Machine Learning Engineer", "absolute_url": "https://boards.greenhouse.io/acme/jobs/5",
+  "location": {"name": "Washington, DC"},
+  "content": "&lt;p&gt;Requires an active TS/SCI clearance. US citizens only.&lt;/p&gt;"},
+ {"id": 6, "title": "Data Analyst", "absolute_url": "https://boards.greenhouse.io/acme/jobs/6",
+  "location": {"name": "Austin, TX"},
+  "content": "&lt;p&gt;5+ years of experience with SQL required.&lt;/p&gt;"},
+ {"id": 7, "title": "Office Manager", "absolute_url": "https://boards.greenhouse.io/acme/jobs/7",
+  "location": {"name": "Austin, TX"}, "content": ""},
+ {"id": 8, "title": "Analytics Engineer", "absolute_url": "https://boards.greenhouse.io/acme/jobs/8",
+  "location": {"name": ""}, "content": "&lt;p&gt;No security clearance required.&lt;/p&gt;"}
+]}

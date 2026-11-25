@@ -1,192 +1,140 @@
 """
-report_generator.py — Markdown report builder for F-1 Job Hunter Agent
-Generates two daily reports from today's YES-verdict jobs in the DB.
+report_generator.py - Markdown reports for F-1 Job Hunter.
+
+Reports are built from the SQLite DB (active YES jobs first seen within `since_days`).
 """
 
-import os
 import logging
+import os
+import re
 from datetime import date, datetime
 
 import database
 
 logger = logging.getLogger(__name__)
 
-REPORTS_DIR = os.path.join(os.path.dirname(__file__), "reports")
+REPORTS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "reports")
 
 TIER_LABELS = {
-    "1": "🥇 Tier 1 — Highest Priority",
-    "2": "🥈 Tier 2 — Very Strong Match",
-    "3": "🥉 Tier 3 — Good Opportunity",
-    "other": "📌 Other",
+    "1": "Tier 1 - Highest priority",
+    "2": "Tier 2 - Strong match",
+    "3": "Tier 3 - Good opportunity",
+    "other": "Other",
 }
 
 
-def _group_by_tier(jobs: list) -> dict:
-    """Group a flat list of jobs into a dict keyed by tier."""
-    grouped = {"1": [], "2": [], "3": [], "other": []}
-    for job in jobs:
-        tier = job.get("tier", "other")
-        grouped.setdefault(tier, []).append(job)
-    return grouped
+def _md(text: str) -> str:
+    """Escape characters that would break a Markdown link label."""
+    return re.sub(r"([\[\]])", r"\\\1", text or "")
 
 
-def _group_by_company(jobs: list) -> dict:
-    """Group jobs by company name."""
+def _group(jobs, key):
     grouped = {}
-    for job in jobs:
-        company = job.get("company", "Unknown")
-        grouped.setdefault(company, []).append(job)
+    for j in jobs:
+        grouped.setdefault(j.get(key) or "other", []).append(j)
     return grouped
 
 
-# ---------------------------------------------------------------------------
-# Track A Report
-# ---------------------------------------------------------------------------
-
-def generate_ats_report(max_jobs: int = 25) -> str:
-    """
-    Generate daily_jobs_YYYY-MM-DD.md for Track A (ATS/aggregator jobs).
-    Returns the path to the created file.
-    """
-    os.makedirs(REPORTS_DIR, exist_ok=True)
+def render_ats_report(jobs: list, since_days: int = 0, meta: dict = None, removed: list = None) -> str:
+    meta = meta or {}
     today = str(date.today())
-    filepath = os.path.join(REPORTS_DIR, f"daily_jobs_{today}.md")
-
-    jobs = database.get_todays_yes_jobs("A")
-    jobs = jobs[:max_jobs]
-    grouped = _group_by_tier(jobs)
-
-    now = datetime.now().strftime("%B %d, %Y at %I:%M %p")
-    total = len(jobs)
-
+    window = "today" if since_days == 0 else f"the last {since_days + 1} days"
     lines = [
-        f"# 🎯 Daily Job Digest — {today}",
-        f"",
-        f"> **Generated:** {now}  ",
-        f"> **Track:** A — ATS & Aggregator (Greenhouse / Lever)  ",
-        f"> **Total qualifying jobs:** {total}  ",
-        f"> **How to use:** Review each listing carefully before applying. The AI defaults to YES when unsure — always check the full JD.",
-        f"",
-        "---",
+        f"# Daily Job Digest - {today}",
+        "",
+        f"> **Generated:** {datetime.now().strftime('%Y-%m-%d %H:%M')}  ",
+        "> **Track:** A - Greenhouse / Lever public job-board APIs  ",
+        f"> **New matching jobs (first seen {window}):** {len(jobs)}  ",
+        "> **Note:** Eligibility is keyword-rule based (and optionally a local LLM). "
+        "Unclear postings default to YES - always read the full posting.",
         "",
     ]
+    if meta:
+        lines += [
+            "## Run summary", "",
+            f"- Boards fetched OK: {meta.get('companies_ok', '?')}"
+            f" (failed: {len(meta.get('companies_failed', []))})",
+            f"- Postings fetched: {meta.get('fetched', '?')}; newly evaluated: {meta.get('processed', '?')};"
+            f" already seen: {meta.get('seen', '?')}",
+            f"- Rejected by rules: {meta.get('no', '?')}; skipped (role/location):"
+            f" {meta.get('role_skipped', 0)}/{meta.get('location_skipped', 0)}",
+        ]
+        if meta.get("companies_failed"):
+            lines.append(f"- Failed boards: {', '.join(meta['companies_failed'])}")
+        lines.append("")
+    lines += ["---", ""]
 
-    if total == 0:
-        lines.append("_No new jobs found today matching your criteria. Check back tomorrow!_")
+    if not jobs:
+        lines.append(f"_No new matching jobs first seen {window}._")
     else:
-        job_num = 1
-        for tier_key in ["1", "2", "3", "other"]:
-            tier_jobs = grouped.get(tier_key, [])
+        grouped = _group(jobs, "tier")
+        n = 1
+        for tier in ("1", "2", "3", "other"):
+            tier_jobs = grouped.get(tier, [])
             if not tier_jobs:
                 continue
-
-            lines.append(f"## {TIER_LABELS.get(tier_key, tier_key)}")
+            lines += [f"## {TIER_LABELS[tier]} ({len(tier_jobs)})", ""]
+            for j in tier_jobs:
+                loc = f" - {j['location']}" if j.get("location") else ""
+                lines.append(f"{n}. **[{_md(j['title'])}]({j['url']})** - {j['company']}{loc}")
+                n += 1
             lines.append("")
 
-            for job in tier_jobs:
-                title = job.get("title", "Unknown Title")
-                company = job.get("company", "Unknown Company")
-                location = job.get("location", "")
-                url = job.get("url", "#")
-
-                lines.append(f"### {job_num}. {title}")
-                lines.append(f"**Company:** {company}  ")
-                if location:
-                    lines.append(f"**Location:** {location}  ")
-                lines.append(f"**Apply:** [Open Application →]({url})  ")
-                lines.append("")
-                lines.append("---")
-                lines.append("")
-                job_num += 1
-
-    with open(filepath, "w", encoding="utf-8") as f:
-        f.write("\n".join(lines))
-
-    logger.info(f"[Report] Track A report saved: {filepath} ({total} jobs)")
-    return filepath
+    if removed:
+        lines += ["---", "", f"## No longer listed ({len(removed)})", "",
+                  "_Previously reported jobs that disappeared from their board._", ""]
+        lines += [f"- {_md(r['title'])} - {r['company']}" for r in removed[:50]]
+        lines.append("")
+    return "\n".join(lines)
 
 
-# ---------------------------------------------------------------------------
-# Track B Report
-# ---------------------------------------------------------------------------
-
-def generate_bigtech_report(max_jobs: int = 30) -> str:
-    """
-    Generate bigtech_jobs_YYYY-MM-DD.md for Track B (Big Tech direct pages).
-    Returns the path to the created file.
-    """
-    os.makedirs(REPORTS_DIR, exist_ok=True)
+def render_bigtech_report(jobs: list, since_days: int = 0, meta: dict = None) -> str:
+    meta = meta or {}
     today = str(date.today())
-    filepath = os.path.join(REPORTS_DIR, f"bigtech_jobs_{today}.md")
-
-    jobs = database.get_todays_yes_jobs("B")
-    jobs = jobs[:max_jobs]
-    by_company = _group_by_company(jobs)
-    total = len(jobs)
-
-    now = datetime.now().strftime("%B %d, %Y at %I:%M %p")
-
+    window = "today" if since_days == 0 else f"the last {since_days + 1} days"
     lines = [
-        f"# 🏢 Big Tech Job Digest — {today}",
-        f"",
-        f"> **Generated:** {now}  ",
-        f"> **Track:** B — Big Tech Direct Career Pages  ",
-        f"> **Total qualifying jobs:** {total}  ",
-        f"> **Companies scraped:** {', '.join(by_company.keys()) or 'None'}",
-        f"",
-        "---",
+        f"# Big Tech Job Digest - {today}",
+        "",
+        f"> **Generated:** {datetime.now().strftime('%Y-%m-%d %H:%M')}  ",
+        "> **Track:** B - Big Tech career pages (Playwright, best effort)  ",
+        f"> **New matching jobs (first seen {window}):** {len(jobs)}",
         "",
     ]
-
-    if total == 0:
-        lines.append("_No Big Tech jobs found today matching your criteria. The companies may have posted nothing new, or anti-bot protections may have blocked scraping. Try again tomorrow._")
+    if meta.get("results"):
+        lines += ["## Site status", ""]
+        for name, r in meta["results"].items():
+            lines.append(f"- {name}: {r}")
+        lines.append("")
+    lines += ["---", ""]
+    if not jobs:
+        lines.append("_No Big Tech jobs found. Career sites often block automation or change "
+                     "their layout; see the site status above and the log._")
     else:
-        # Sort companies so ones with more jobs appear first
-        sorted_companies = sorted(by_company.items(), key=lambda x: -len(x[1]))
-
-        for company, company_jobs in sorted_companies:
-            lines.append(f"## 🏷️ {company}  ({len(company_jobs)} jobs)")
+        by_co = _group(jobs, "company")
+        for company, cjobs in sorted(by_co.items(), key=lambda kv: -len(kv[1])):
+            lines += [f"## {company} ({len(cjobs)})", ""]
+            for j in cjobs:
+                loc = f" - {j['location']}" if j.get("location") else ""
+                lines.append(f"- [T{j.get('tier', '?')}] **[{_md(j['title'])}]({j['url']})**{loc}")
             lines.append("")
-
-            # Sort within company by tier
-            company_jobs_sorted = sorted(
-                company_jobs,
-                key=lambda j: {"1": 1, "2": 2, "3": 3}.get(j.get("tier", "3"), 4)
-            )
-
-            for job in company_jobs_sorted:
-                title = job.get("title", "Unknown Title")
-                location = job.get("location", "")
-                url = job.get("url", "#")
-                tier = job.get("tier", "?")
-                tier_badge = {"1": "🥇", "2": "🥈", "3": "🥉"}.get(tier, "📌")
-
-                lines.append(f"### {tier_badge} {title}")
-                if location:
-                    lines.append(f"📍 {location}  ")
-                lines.append(f"🔗 [Apply Here →]({url})  ")
-                lines.append("")
-
-            lines.append("---")
-            lines.append("")
-
-    with open(filepath, "w", encoding="utf-8") as f:
-        f.write("\n".join(lines))
-
-    logger.info(f"[Report] Track B report saved: {filepath} ({total} jobs)")
-    return filepath
+    return "\n".join(lines)
 
 
-# ---------------------------------------------------------------------------
-# Generate both reports
-# ---------------------------------------------------------------------------
+def _write(name: str, content: str) -> str:
+    os.makedirs(REPORTS_DIR, exist_ok=True)
+    path = os.path.join(REPORTS_DIR, f"{name}_{date.today()}.md")
+    with open(path, "w", encoding="utf-8") as f:
+        f.write(content)
+    return path
 
-def generate_all(config: dict) -> tuple:
-    """
-    Generate both Track A and Track B reports.
-    Returns (ats_path, bigtech_path).
-    """
-    limits = config.get("limits", {})
-    ats_path = generate_ats_report(max_jobs=limits.get("track_a_report_max", 25))
-    bt_path = generate_bigtech_report(max_jobs=limits.get("track_b_report_max", 30))
+
+def generate_all(config: dict, since_days: int = 0, ats_meta: dict = None, bt_meta: dict = None) -> tuple:
+    """Write both reports from the DB. Returns (ats_path, bigtech_path)."""
+    limits = config.get("limits", {}) or {}
+    ats_jobs = database.get_new_yes_jobs("A", since_days)[: limits.get("track_a_report_max", 25) or None]
+    bt_jobs = database.get_new_yes_jobs("B", since_days)[: limits.get("track_b_report_max", 30) or None]
+    removed = database.get_removed_since(since_days)
+    ats_path = _write("daily_jobs", render_ats_report(ats_jobs, since_days, ats_meta, removed))
+    bt_path = _write("bigtech_jobs", render_bigtech_report(bt_jobs, since_days, bt_meta))
+    logger.info(f"[Report] wrote {ats_path} ({len(ats_jobs)} jobs) and {bt_path} ({len(bt_jobs)} jobs)")
     return ats_path, bt_path

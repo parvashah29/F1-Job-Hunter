@@ -1,17 +1,18 @@
 """
 ai_analyzer.py — Ollama LLM wrapper for F-1 Job Hunter Agent
 Sends job descriptions to a local Ollama model and returns YES/NO on whether
-an F-1 OPT new grad (graduating May 2027) can apply.
+an F-1 OPT new grad can apply. Optional: rules in eligibility.py always run first.
 """
 
 import requests
 import logging
-import re
 import time
+
+import eligibility
 
 logger = logging.getLogger(__name__)
 
-PROMPT_TEMPLATE = """You are an expert US immigration-aware technical recruiter reviewing a job description on behalf of a new graduate on an F-1 visa (OPT, graduating May 2027, 0 years of full-time experience).
+PROMPT_TEMPLATE = """You are an expert US immigration-aware technical recruiter reviewing a job description on behalf of a new graduate on an F-1 visa (OPT, 0 years of full-time experience).
 
 Your task: Return "YES" only if BOTH conditions below are true. Otherwise return "NO".
 
@@ -40,96 +41,76 @@ Job Description:
 
 Answer (YES or NO only):"""
 
-# Fast regex patterns that identify high-YOE requirements — used BEFORE calling Ollama
-# If matched, we can skip the LLM entirely and return NO immediately
-_YOE_PATTERNS = [
-    # e.g. "3+ years", "5 years of experience", "10+ years"
-    r'\b([3-9]|\d{2})\+?\s*(?:or more\s*)?years?\s+(?:of\s+)?(?:professional\s+)?(?:industry\s+)?(?:relevant\s+)?experience',
-    # e.g. "minimum 4 years", "at least 5 years"
-    r'(?:minimum|at least|min\.?)\s+([3-9]|\d{2})\s+years?',
-    # e.g. "5-7 years experience", "7-10 years of data science experience"
-    r'\b([3-9]|\d{2})\s*[-–]\s*\d+\s+years?(?:\s+of\s+\w+(?:\s+\w+)*)?\s+experience',
-]
-_YOE_RE = [re.compile(p, re.IGNORECASE) for p in _YOE_PATTERNS]
-
-# Seniority phrases that appear in the body of a JD (not just the title)
-_BODY_SENIORITY = re.compile(
-    r'\b(senior|staff|principal|lead\s+engineer|lead\s+scientist|director|'
-    r'manager|architect|distinguished|head\s+of)\b',
-    re.IGNORECASE
-)
+DEFAULT_OLLAMA_URL = "http://localhost:11434"
 
 
 def check_yoe_in_description(description: str) -> bool:
-    """
-    Fast pre-filter — returns True if the description explicitly requires 3+ years.
-    If True, skip Ollama and return NO immediately.
-    """
-    text = description[:3000]
-    return any(pattern.search(text) for pattern in _YOE_RE)
+    """True if the description explicitly requires 3+ years of experience."""
+    return eligibility.check_yoe(description)
 
 
-
-def analyze_job(description: str, model: str = "llama3.2", timeout: int = 45) -> str:
+def analyze_job(description: str, model: str = "llama3.2", timeout: int = 45,
+                base_url: str = DEFAULT_OLLAMA_URL):
     """
-    Send a job description to the local Ollama instance.
-    Returns 'YES' or 'NO'. Defaults to 'YES' on error or ambiguity.
-    Retries once on timeout.
+    Ask the local Ollama model. Returns 'YES', 'NO', or None when the model could not
+    be reached / gave an unusable answer (callers treat None as 'no opinion').
     """
-    truncated = description[:4000].strip()
+    truncated = (description or "")[:4000].strip()
     if not truncated:
-        return "YES"  # No description to analyze — let user decide
-
-    prompt = PROMPT_TEMPLATE.format(description=truncated)
+        return None
     payload = {
         "model": model,
-        "prompt": prompt,
+        "prompt": PROMPT_TEMPLATE.format(description=truncated),
         "stream": False,
-        "options": {
-            "temperature": 0.0,   # Deterministic — we want a strict YES/NO
-            "num_predict": 10,    # We only need 1 token back
-        }
+        "options": {"temperature": 0.0, "num_predict": 10},
     }
-
-    for attempt in range(2):  # Try twice before defaulting to YES
+    for attempt in range(2):
         try:
-            response = requests.post(
-                "http://localhost:11434/api/generate",
-                json=payload,
-                timeout=timeout,
-            )
+            response = requests.post(f"{base_url}/api/generate", json=payload, timeout=timeout)
             response.raise_for_status()
             raw = response.json().get("response", "").strip().upper()
-
-            # Parse strictly — look for YES or NO anywhere in the response
             if "NO" in raw and "YES" not in raw:
                 return "NO"
-            elif "YES" in raw:
+            if "YES" in raw:
                 return "YES"
-            else:
-                logger.warning(f"Ambiguous LLM response: '{raw}' — defaulting to YES")
-                return "YES"
-
+            logger.warning(f"Ambiguous LLM response: {raw!r} - ignoring")
+            return None
         except requests.exceptions.Timeout:
             logger.warning(f"Ollama timeout on attempt {attempt + 1}")
             if attempt == 0:
                 time.sleep(2)
-            continue
         except requests.exceptions.ConnectionError:
-            logger.error("Cannot connect to Ollama. Is it running? Try: ollama serve")
-            return "YES"
+            logger.error("Cannot connect to Ollama (is `ollama serve` running?) - using rules only")
+            return None
         except Exception as e:
-            logger.error(f"Unexpected error calling Ollama: {e}")
-            return "YES"
-
-    logger.warning("Both Ollama attempts timed out — defaulting to YES")
-    return "YES"
+            logger.error(f"Unexpected error calling Ollama: {type(e).__name__}")
+            return None
+    return None
 
 
-def is_ollama_running() -> bool:
-    """Quick health check — returns True if Ollama is reachable."""
+def is_ollama_running(base_url: str = DEFAULT_OLLAMA_URL) -> bool:
     try:
-        r = requests.get("http://localhost:11434/api/tags", timeout=5)
-        return r.status_code == 200
+        return requests.get(f"{base_url}/api/tags", timeout=5).status_code == 200
     except Exception:
         return False
+
+
+def decide(description: str, ai_cfg: dict = None, use_llm: bool = True) -> tuple:
+    """
+    Final eligibility decision -> (verdict, reason).
+    Rules run first. If they say YES and the LLM is enabled+reachable, the LLM may
+    still veto (NO). With the LLM off or unreachable we fall back to rules only.
+    """
+    verdict, reason = eligibility.evaluate(description)
+    ai_cfg = ai_cfg or {}
+    if verdict == "NO" or not use_llm or not ai_cfg.get("enabled", False):
+        return verdict, reason
+    llm = analyze_job(
+        description,
+        model=ai_cfg.get("model", "llama3.2"),
+        timeout=ai_cfg.get("timeout_seconds", 45),
+        base_url=ai_cfg.get("ollama_url", DEFAULT_OLLAMA_URL),
+    )
+    if llm == "NO":
+        return "NO", "llm:no"
+    return "YES", reason + ("+llm:yes" if llm == "YES" else "")

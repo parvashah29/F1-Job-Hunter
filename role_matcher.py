@@ -1,7 +1,7 @@
 """
 role_matcher.py — Keyword-based tier classifier for job titles.
 Pre-filters job titles before sending to the AI (saves LLM calls).
-Also filters out senior/experienced roles not appropriate for a May 2027 new grad.
+Also filters out senior/experienced roles not appropriate for a new grad.
 """
 
 import re
@@ -13,12 +13,11 @@ from typing import Optional
 # ---------------------------------------------------------------------------
 
 SENIORITY_BLOCKLIST = [
-    "senior", "sr.", "sr ",
-    "staff", "principal", "distinguished",
-    "lead ", "tech lead", "team lead",
-    "director", "vp ", "vice president",
+    "senior", "sr", "staff", "principal", "distinguished",
+    "lead", "tech lead", "team lead",
+    "director", "vp", "vice president",
     "head of", "manager", "chief",
-    "architect",
+    "architect", "ii", "iii", "iv", "intern", "internship", "co-op",
     # Contract/consulting markers
     "(contract)", "contractor", "freelance",
     # Over-qualified research
@@ -80,49 +79,61 @@ COMPANY_SPECIFIC_TITLES = [
 ]
 
 
+
+def _compile(keywords):
+    return [(kw, re.compile(r"(?<![a-z0-9])" + re.escape(kw) + r"(?![a-z0-9])")) for kw in keywords]
+
+
+_TECH_HINTS = ["engineer", "developer", "scientist", "analyst", "data", "ai", "ml",
+               "software", "cloud", "platform"]
+
+_state = {}
+
+
+def _build(tier_keywords=None, blocklist=None, early=None, company_specific=None):
+    _state["blocklist"] = _compile([k.lower() for k in (blocklist or SENIORITY_BLOCKLIST)])
+    _state["tiers"] = {t: _compile([k.lower() for k in kws])
+                       for t, kws in (tier_keywords or TIER_KEYWORDS).items()}
+    _state["early"] = _compile([k.lower() for k in (early or EARLY_CAREER_SIGNALS)])
+    _state["company"] = _compile([k.lower() for k in (company_specific or COMPANY_SPECIFIC_TITLES)])
+    _state["hints"] = _compile(_TECH_HINTS)
+
+
+def configure(config: dict):
+    """Use the `roles:` section of config.yaml (tier1/2/3, early_career_keywords, company_specific)."""
+    roles = (config or {}).get("roles") or {}
+    tiers = {t: roles[f"tier{t}"] for t in ("1", "2", "3") if roles.get(f"tier{t}")}
+    blocklist = list(SENIORITY_BLOCKLIST) + [k for k in roles.get("exclude_keywords", []) or []]
+    _build(tiers or None, blocklist, roles.get("early_career_keywords") or None,
+           [k for k in (roles.get("company_specific") or [])] or None)
+
+
+def _any(compiled, text):
+    return any(rx.search(text) for _, rx in compiled)
+
+
 def is_senior(title: str) -> bool:
-    """
-    Return True if the title contains seniority markers that indicate
-    this role is NOT appropriate for a May 2027 new grad.
-    """
-    lowered = title.lower().strip()
-    return any(marker in lowered for marker in SENIORITY_BLOCKLIST)
+    """True if the title carries seniority/level markers inappropriate for a new grad."""
+    return _any(_state["blocklist"], title.lower().strip())
 
 
 def classify_tier(title: str) -> Optional[str]:
-    """
-    Return the tier ('1', '2', '3') if the job title matches our role keywords,
-    or None if the job is completely unrelated OR is a senior-level role.
-    """
+    """Return '1'/'2'/'3' if the title matches a target role and is not senior, else None."""
     lowered = title.lower().strip()
-
-    # Immediately reject senior/experienced roles
-    if is_senior(title):
+    if not lowered or is_senior(lowered):
         return None
-
-    # Check company-specific titles first (always tier 1)
-    for kw in COMPANY_SPECIFIC_TITLES:
-        if kw in lowered:
-            return "1"
-
-    # Check tiers 1 → 2 → 3 in order
-    for tier, keywords in TIER_KEYWORDS.items():
-        for kw in keywords:
-            if kw in lowered:
-                return tier
-
-    # Fallback: check early-career signals alone — might still be relevant
-    for signal in EARLY_CAREER_SIGNALS:
-        if signal in lowered:
-            # Only pass through if it's even vaguely tech-related
-            tech_hints = ["engineer", "developer", "scientist", "analyst",
-                          "data", "ai", "ml", "software", "cloud", "platform"]
-            if any(h in lowered for h in tech_hints):
-                return "3"  # Conservative — mark as tier 3
-
-    return None  # Not in our target role set — skip
+    if _any(_state["company"], lowered):
+        return "1"
+    for tier in ("1", "2", "3"):
+        if _any(_state["tiers"].get(tier, []), lowered):
+            return tier
+    if _any(_state["early"], lowered) and _any(_state["hints"], lowered):
+        return "3"
+    return None
 
 
 def is_relevant(title: str) -> bool:
-    """Returns True if the job title is worth processing (relevant + not senior)."""
     return classify_tier(title) is not None
+
+
+_build()

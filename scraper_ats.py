@@ -1,296 +1,183 @@
 """
-scraper_ats.py — Track A Scraper for F-1 Job Hunter Agent
-Uses the public Greenhouse and Lever JSON APIs (no Playwright needed).
-Filters job titles using role_matcher, then passes descriptions to the AI.
+scraper_ats.py - Track A for F-1 Job Hunter.
+
+Reads the public Greenhouse and Lever JSON job-board APIs (one request per company, no
+HTML scraping, no login). Pipeline per job:
+  role/tier match -> location filter -> dedup (SQLite) -> eligibility rules (+ optional LLM)
 """
 
-import requests
-import time
+import html
 import logging
 import random
-import yaml
-import os
-from typing import Optional
+import re
+import time
 
-import database
+import requests
+
 import ai_analyzer
-import role_matcher
+import database
 import location_filter
+import role_matcher
+from http_util import DEFAULT_TIMEOUT, make_session
 
 logger = logging.getLogger(__name__)
 
-CONFIG_PATH = os.path.join(os.path.dirname(__file__), "config.yaml")
+GREENHOUSE_URL = "https://boards-api.greenhouse.io/v1/boards/{slug}/jobs?content=true"
+LEVER_URL = "https://api.lever.co/v0/postings/{slug}?mode=json"
 
-HEADERS = {
-    "User-Agent": (
-        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
-        "AppleWebKit/537.36 (KHTML, like Gecko) "
-        "Chrome/125.0.0.0 Safari/537.36"
-    ),
-    "Accept": "application/json",
-}
+
+def html_to_text(raw: str) -> str:
+    """Greenhouse returns entity-escaped HTML; unescape, drop tags, collapse whitespace."""
+    text = html.unescape(raw or "")
+    text = re.sub(r"<(?:br|/p|/li|/h\d)\s*/?>", "\n", text, flags=re.I)
+    text = re.sub(r"<[^>]+>", " ", text)
+    text = html.unescape(text)
+    return re.sub(r"[ \t\r\f\v]+", " ", re.sub(r"\n\s*", "\n", text)).strip()
 
 
 # ---------------------------------------------------------------------------
-# Greenhouse helpers
+# Fetchers - return a list of normalized dicts, or None if the fetch FAILED
+# (None vs [] matters: only a successful fetch may mark vanished jobs as removed)
 # ---------------------------------------------------------------------------
 
-def _fetch_greenhouse_jobs(slug: str) -> list:
-    """
-    Fetch all open positions from a company's Greenhouse board.
-    Returns a list of dicts: {title, url, id, location}
-    """
-    url = f"https://boards-api.greenhouse.io/v1/boards/{slug}/jobs"
+def _get_json(session, url, label):
     try:
-        r = requests.get(url, headers=HEADERS, timeout=15)
+        r = session.get(url, timeout=DEFAULT_TIMEOUT)
+        if r.status_code in (403, 404):
+            logger.warning(f"[Track A] {label}: board not found or private (HTTP {r.status_code})")
+            return None
         r.raise_for_status()
-        data = r.json()
-        jobs = data.get("jobs", [])
-        return [
-            {
-                "title": j.get("title", ""),
-                "url": j.get("absolute_url", ""),
-                "id": j.get("id"),
-                "location": j.get("location", {}).get("name", ""),  # ← real location
-            }
-            for j in jobs
-            if j.get("title") and j.get("absolute_url")
-        ]
-    except requests.exceptions.HTTPError as e:
-        if e.response.status_code == 404:
-            logger.warning(f"Greenhouse slug not found: {slug}")
-        else:
-            logger.error(f"Greenhouse HTTP error for {slug}: {e}")
-    except Exception as e:
-        logger.error(f"Greenhouse fetch error for {slug}: {e}")
-    return []
+        return r.json()
+    except (requests.RequestException, ValueError) as e:
+        logger.error(f"[Track A] {label}: fetch failed ({type(e).__name__}: {e})")
+        return None
 
 
-def _fetch_greenhouse_description(slug: str, job_id: int) -> str:
-    """Fetch the full job description text for a single Greenhouse job."""
-    url = f"https://boards-api.greenhouse.io/v1/boards/{slug}/jobs/{job_id}"
-    try:
-        r = requests.get(url, headers=HEADERS, timeout=15)
-        r.raise_for_status()
-        data = r.json()
-        # content is HTML — extract text naively
-        content = data.get("content", "")
-        # Strip HTML tags
-        import re
-        text = re.sub(r"<[^>]+>", " ", content)
-        text = re.sub(r"\s+", " ", text).strip()
-        return text
-    except Exception as e:
-        logger.warning(f"Could not fetch Greenhouse description for job {job_id}: {e}")
-        return ""
+def fetch_greenhouse(session, slug: str):
+    data = _get_json(session, GREENHOUSE_URL.format(slug=slug), f"{slug} (Greenhouse)")
+    if not isinstance(data, dict):
+        return None
+    out = []
+    for j in data.get("jobs", []):
+        if not (j.get("title") and j.get("absolute_url")):
+            continue
+        out.append({
+            "title": j["title"].strip(),
+            "url": j["absolute_url"],
+            "location": ((j.get("location") or {}).get("name") or "").strip(),
+            "description": html_to_text(j.get("content", "")),
+        })
+    return out
 
 
-# ---------------------------------------------------------------------------
-# Lever helpers
-# ---------------------------------------------------------------------------
-
-def _fetch_lever_jobs(slug: str) -> list:
-    """
-    Fetch all open positions from a company's Lever board.
-    Returns a list of dicts: {title, url, description, location}
-    """
-    url = f"https://api.lever.co/v0/postings/{slug}?mode=json"
-    try:
-        r = requests.get(url, headers=HEADERS, timeout=15)
-        r.raise_for_status()
-        jobs = r.json()
-        if not isinstance(jobs, list):
-            return []
-        return [
-            {
-                "title": j.get("text", ""),
-                "url": j.get("hostedUrl", ""),
-                "description": (
-                    j.get("descriptionPlain", "") or
-                    j.get("description", "")
-                ),
-                "location": (j.get("categories", {}) or {}).get("location", ""),
-            }
-            for j in jobs
-            if j.get("text") and j.get("hostedUrl")
-        ]
-    except requests.exceptions.HTTPError as e:
-        if e.response.status_code in (404, 403):
-            logger.warning(f"Lever slug not found or private: {slug}")
-        else:
-            logger.error(f"Lever HTTP error for {slug}: {e}")
-    except Exception as e:
-        logger.error(f"Lever fetch error for {slug}: {e}")
-    return []
+def fetch_lever(session, slug: str):
+    data = _get_json(session, LEVER_URL.format(slug=slug), f"{slug} (Lever)")
+    if not isinstance(data, list):
+        return None
+    out = []
+    for j in data:
+        if not (j.get("text") and j.get("hostedUrl")):
+            continue
+        parts = [j.get("descriptionPlain") or html_to_text(j.get("description", ""))]
+        for lst in j.get("lists") or []:
+            parts.append(lst.get("text", ""))
+            parts.append(html_to_text(lst.get("content", "")))
+        parts.append(j.get("additionalPlain") or html_to_text(j.get("additional", "")))
+        out.append({
+            "title": j["text"].strip(),
+            "url": j["hostedUrl"],
+            "location": ((j.get("categories") or {}).get("location") or "").strip(),
+            "description": "\n".join(p for p in parts if p),
+        })
+    return out
 
 
 # ---------------------------------------------------------------------------
-# Main Track A runner
+# Per-company processing
 # ---------------------------------------------------------------------------
 
-def run(config: dict, dry_run: bool = False) -> int:
-    """
-    Run Track A scraper.
-    Returns the count of new YES jobs found.
-    """
-    ai_model = config.get("ai", {}).get("model", "llama3.2")
-    ai_timeout = config.get("ai", {}).get("timeout_seconds", 45)
-    track_a_cfg = config.get("track_a", {})
-    gh_companies = track_a_cfg.get("greenhouse_companies", [])
-    lv_companies = track_a_cfg.get("lever_companies", [])
-
-    yes_count = 0
-    total_seen = 0
-    total_processed = 0
-
-    logger.info(f"[Track A] Starting — {len(gh_companies)} Greenhouse + {len(lv_companies)} Lever companies")
-
-    # ── Greenhouse ──────────────────────────────────────────────────────────
-    for company in gh_companies:
-        slug = company["slug"]
-        name = company["name"]
-
-        try:
-            jobs = _fetch_greenhouse_jobs(slug)
-            logger.info(f"[Track A] {name} (Greenhouse) — {len(jobs)} open positions")
-        except Exception as e:
-            logger.error(f"[Track A] Failed to fetch {name}: {e}")
+def process_company(name: str, jobs: list, ai_cfg: dict, dry_run: bool, stats: dict, track="A"):
+    """Filter/score one company's jobs; appends accepted ones to stats['found']."""
+    use_llm = not dry_run
+    for job in jobs:
+        title, url, raw_loc = job["title"], job["url"], job["location"]
+        tier = role_matcher.classify_tier(title)
+        if tier is None:
+            stats["role_skipped"] += 1
+            continue
+        if not location_filter.is_us_or_remote(raw_loc):
+            stats["location_skipped"] += 1
             continue
 
-        for job in jobs:
-            title = job["title"]
-            url = job["url"]
-            job_id = job["id"]
-            raw_location = job.get("location", "")
-
-            # Pre-filter by role keyword
-            tier = role_matcher.classify_tier(title)
-            if tier is None:
-                continue
-
-            # ── Location filter — skip non-US/non-remote jobs ──
-            if not location_filter.is_us_or_remote(raw_location):
-                logger.debug(f"  ⏭️  Skipped (non-US location: {raw_location}): {title}")
-                continue
-
-            # Skip already seen jobs
-            if database.is_seen(url):
-                total_seen += 1
-                continue
-
-            total_processed += 1
-
-            # Fetch full description for AI analysis
-            description = _fetch_greenhouse_description(slug, job_id)
-            time.sleep(random.uniform(0.3, 0.8))  # Be polite to the API
-
-            # ── Fast YOE pre-filter — skip before calling Ollama ──
-            if ai_analyzer.check_yoe_in_description(description):
-                logger.info(f"  ⏭️  [YOE] Skipped high-experience role: {title} @ {name}")
-                if not dry_run:
-                    database.save_job({
-                        "url": url, "title": title, "company": name,
-                        "location": location_filter.clean_location(raw_location),
-                        "track": "A", "tier": tier, "ai_verdict": "NO",
-                    })
-                continue
-
-            verdict = "YES" if dry_run else ai_analyzer.analyze_job(
-                description, model=ai_model, timeout=ai_timeout
-            )
-
-            job_record = {
-                "url": url,
-                "title": title,
-                "company": name,
-                "location": location_filter.clean_location(raw_location),
-                "track": "A",
-                "tier": tier,
-                "ai_verdict": verdict,
-            }
-
-            if not dry_run:
-                database.save_job(job_record)
-
-            if verdict == "YES":
-                yes_count += 1
-                logger.info(f"  ✅ [{tier}] {title} @ {name}")
-            else:
-                logger.info(f"  ❌ [{tier}] {title} @ {name} — Filtered")
-
-        # Small cooldown between companies
-        time.sleep(random.uniform(1.0, 2.0))
-
-    # ── Lever ───────────────────────────────────────────────────────────────
-    for company in lv_companies:
-        slug = company["slug"]
-        name = company["name"]
-
-        try:
-            jobs = _fetch_lever_jobs(slug)
-            logger.info(f"[Track A] {name} (Lever) — {len(jobs)} open positions")
-        except Exception as e:
-            logger.error(f"[Track A] Failed to fetch {name}: {e}")
+        existing = None if dry_run else database.get_job(url)
+        if existing and existing.get("reason") is not None and existing["title"] == title:
+            database.touch_job(url)
+            stats["seen"] += 1
             continue
 
-        for job in jobs:
-            title = job["title"]
-            url = job["url"]
-            description = job.get("description", "")
-            raw_location = job.get("location", "")
+        verdict, reason = ai_analyzer.decide(job["description"], ai_cfg, use_llm=use_llm)
+        record = {
+            "url": url, "title": title, "company": name,
+            "location": location_filter.clean_location(raw_loc),
+            "track": track, "tier": tier, "ai_verdict": verdict, "reason": reason,
+        }
+        change = "new" if dry_run else database.save_job(record)
+        if change == "changed":
+            stats["changed"] += 1
+        stats["processed"] += 1
+        if verdict == "YES":
+            stats["yes"] += 1
+            stats["found"].append(record)
+            logger.info(f"  [YES][T{tier}] {title} @ {name} ({reason})")
+        else:
+            stats["no"] += 1
+            logger.info(f"  [NO ][T{tier}] {title} @ {name} ({reason})")
 
-            tier = role_matcher.classify_tier(title)
-            if tier is None:
-                continue
 
-            # ── Location filter ──
-            if not location_filter.is_us_or_remote(raw_location):
-                logger.debug(f"  ⏭️  Skipped (non-US location: {raw_location}): {title}")
-                continue
+def run(config: dict, dry_run: bool = False, limit: int = None, session=None) -> dict:
+    """
+    Run Track A. `limit` caps the number of companies scraped (useful for smoke tests).
+    Returns a stats dict (see `stats` below); never raises for a single company's failure.
+    """
+    cfg = config.get("track_a", {}) or {}
+    ai_cfg = config.get("ai", {}) or {}
+    delay = float(cfg.get("request_delay_seconds", 1.0))
+    session = session or make_session()
 
-            if database.is_seen(url):
-                total_seen += 1
-                continue
+    boards = [("Greenhouse", c) for c in cfg.get("greenhouse_companies", []) or []] + \
+             [("Lever", c) for c in cfg.get("lever_companies", []) or []]
+    boards = [(k, c) for k, c in boards if c.get("enabled", True)]
+    if limit:
+        boards = boards[:limit]
 
-            total_processed += 1
+    stats = {"companies_ok": 0, "companies_failed": [], "fetched": 0, "processed": 0,
+             "seen": 0, "yes": 0, "no": 0, "changed": 0, "removed": 0,
+             "role_skipped": 0, "location_skipped": 0, "found": []}
+    logger.info(f"[Track A] Starting - {len(boards)} boards{' (dry run)' if dry_run else ''}")
 
-            # ── Fast YOE pre-filter ──
-            if ai_analyzer.check_yoe_in_description(description):
-                logger.info(f"  ⏭️  [YOE] Skipped high-experience role: {title} @ {name}")
-                if not dry_run:
-                    database.save_job({
-                        "url": url, "title": title, "company": name,
-                        "location": location_filter.clean_location(raw_location),
-                        "track": "A", "tier": tier, "ai_verdict": "NO",
-                    })
-                continue
-
-            verdict = "YES" if dry_run else ai_analyzer.analyze_job(
-                description, model=ai_model, timeout=ai_timeout
-            )
-
-            job_record = {
-                "url": url,
-                "title": title,
-                "company": name,
-                "location": location_filter.clean_location(raw_location),
-                "track": "A",
-                "tier": tier,
-                "ai_verdict": verdict,
-            }
-
-            if not dry_run:
-                database.save_job(job_record)
-
-            if verdict == "YES":
-                yes_count += 1
-                logger.info(f"  ✅ [{tier}] {title} @ {name}")
+    for i, (kind, company) in enumerate(boards):
+        slug, name = company["slug"], company.get("name", company["slug"])
+        try:
+            fetch = fetch_greenhouse if kind == "Greenhouse" else fetch_lever
+            jobs = fetch(session, slug)
+            if jobs is None:
+                stats["companies_failed"].append(name)
             else:
-                logger.info(f"  ❌ [{tier}] {title} @ {name} — Filtered")
-
-        time.sleep(random.uniform(0.5, 1.5))
+                stats["companies_ok"] += 1
+                stats["fetched"] += len(jobs)
+                logger.info(f"[Track A] {name} ({kind}) - {len(jobs)} open positions")
+                process_company(name, jobs, ai_cfg, dry_run, stats)
+                if not dry_run:
+                    stats["removed"] += database.mark_removed("A", name, [j["url"] for j in jobs])
+        except Exception as e:  # isolate every company
+            logger.error(f"[Track A] {name}: unexpected error {type(e).__name__}: {e}")
+            stats["companies_failed"].append(name)
+        if i < len(boards) - 1:
+            time.sleep(delay * random.uniform(0.8, 1.4))
 
     logger.info(
-        f"[Track A] Done — Processed: {total_processed} new | Skipped (seen): {total_seen} | YES: {yes_count}"
+        f"[Track A] Done - boards ok {stats['companies_ok']}/{len(boards)}, fetched {stats['fetched']}, "
+        f"new evaluated {stats['processed']} (YES {stats['yes']}, NO {stats['no']}), "
+        f"already seen {stats['seen']}, changed {stats['changed']}, removed {stats['removed']}"
     )
-    return yes_count
+    return stats

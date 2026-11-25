@@ -1,239 +1,149 @@
 """
-main.py — Orchestrator for F-1 Job Hunter Agent
+main.py - orchestrator for F-1 Job Hunter.
 
-Usage:
-  python3 main.py              # Full run (scrape + analyze + report + notify)
-  python3 main.py --dry-run    # Test run — no DB writes, no AI calls, no notification
-  python3 main.py --track a    # Run only Track A (ATS)
-  python3 main.py --track b    # Run only Track B (BigTech)
-  python3 main.py --report     # Only regenerate today's reports (skip scraping)
+  python main.py --dry-run --limit 3      # fetch 3 boards, print matches, write nothing
+  python main.py --track a                # Track A only (no browser needed)
+  python main.py --no-email               # full run, skip the email digest
+  python main.py --report --since 3       # rebuild reports from the DB (last 4 days)
 """
 
 import argparse
-import concurrent.futures
 import logging
 import os
 import sys
 import time
-import traceback
-import yaml
 from datetime import datetime
 
-import database
-import ai_analyzer
-import scraper_ats
-import scraper_bigtech
-import report_generator
-import notifier
-import emailer
+from config_loader import ConfigError, load_config
 
-# ---------------------------------------------------------------------------
-# Logging setup
-# ---------------------------------------------------------------------------
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+LOGS_DIR = os.path.join(BASE_DIR, "logs")
 
-LOGS_DIR = os.path.join(os.path.dirname(__file__), "logs")
 
-def setup_logging():
-    os.makedirs(LOGS_DIR, exist_ok=True)
-    log_file = os.path.join(LOGS_DIR, f"run_{datetime.now().strftime('%Y-%m-%d_%H-%M')}.log")
-
-    logging.basicConfig(
-        level=logging.INFO,
-        format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
-        datefmt="%H:%M:%S",
-        handlers=[
-            logging.FileHandler(log_file, encoding="utf-8"),
-            logging.StreamHandler(sys.stdout),
-        ],
+def build_parser() -> argparse.ArgumentParser:
+    p = argparse.ArgumentParser(
+        prog="main.py",
+        description="F-1 Job Hunter - personal job scraper for F-1 OPT job searches "
+                    "(Greenhouse/Lever APIs + best-effort Big Tech career pages).",
     )
+    p.add_argument("--dry-run", action="store_true",
+                   help="fetch and score jobs but write NOTHING: no DB, reports, email or LLM calls")
+    p.add_argument("--track", choices=["a", "b", "both"], default="a",
+                   help="a = Greenhouse/Lever APIs (default), b = Playwright Big Tech sites, both")
+    p.add_argument("--limit", type=int, metavar="N",
+                   help="smoke-test cap: Track A scrapes only the first N boards; "
+                        "Track B processes at most N jobs per site")
+    p.add_argument("--since", type=int, default=0, metavar="DAYS",
+                   help="reports/email include jobs first seen in the last DAYS days (default 0 = today)")
+    p.add_argument("--site", action="append", metavar="NAME",
+                   help="Track B only: restrict to this site (repeatable), e.g. --site Apple")
+    p.add_argument("--no-email", action="store_true", help="never send the email digest")
+    p.add_argument("--no-notify", action="store_true", help="skip the macOS notification")
+    p.add_argument("--config", metavar="PATH",
+                   help="config file (default: config.yaml if present, else config.example.yaml)")
+    p.add_argument("--report", action="store_true",
+                   help="skip scraping; regenerate reports from the existing DB")
+    p.add_argument("--test-email", action="store_true",
+                   help="send a sample digest to the configured recipient and exit")
+    return p
+
+
+def setup_logging(to_file: bool) -> str:
+    handlers = [logging.StreamHandler(sys.stdout)]
+    log_file = ""
+    if to_file:
+        os.makedirs(LOGS_DIR, exist_ok=True)
+        log_file = os.path.join(LOGS_DIR, f"run_{datetime.now().strftime('%Y-%m-%d_%H-%M')}.log")
+        handlers.append(logging.FileHandler(log_file, encoding="utf-8"))
+    logging.basicConfig(level=logging.INFO, handlers=handlers, force=True,
+                        format="%(asctime)s [%(levelname)s] %(name)s: %(message)s", datefmt="%H:%M:%S")
     return log_file
 
-# ---------------------------------------------------------------------------
-# Config loader
-# ---------------------------------------------------------------------------
 
-CONFIG_PATH = os.path.join(os.path.dirname(__file__), "config.yaml")
+def main(argv=None) -> int:
+    args = build_parser().parse_args(argv)
 
-def load_config() -> dict:
-    with open(CONFIG_PATH, "r") as f:
-        return yaml.safe_load(f)
-
-# ---------------------------------------------------------------------------
-# Pre-flight checks
-# ---------------------------------------------------------------------------
-
-def preflight_checks(config: dict) -> bool:
-    """Run sanity checks before starting the main scrape."""
-    logger = logging.getLogger("preflight")
-    all_ok = True
-
-    # Check Ollama
-    if not ai_analyzer.is_ollama_running():
-        logger.error("❌ Ollama is not running! Start it with: ollama serve")
-        logger.error("   Then pull the model: ollama pull llama3.2")
-        all_ok = False
-    else:
-        model = config.get("ai", {}).get("model", "llama3.2")
-        logger.info(f"✅ Ollama running — model: {model}")
-
-    # Check config exists
-    if not os.path.exists(CONFIG_PATH):
-        logger.error(f"❌ config.yaml not found at: {CONFIG_PATH}")
-        all_ok = False
-    else:
-        logger.info("✅ config.yaml loaded")
-
-    return all_ok
-
-# ---------------------------------------------------------------------------
-# Main runners
-# ---------------------------------------------------------------------------
-
-def run_track_a(config: dict, dry_run: bool) -> int:
-    logger = logging.getLogger("track_a")
-    logger.info("=" * 60)
-    logger.info("TRACK A — ATS / Aggregator Scraper")
-    logger.info("=" * 60)
     try:
-        return scraper_ats.run(config, dry_run=dry_run)
-    except Exception as e:
-        logger.error(f"Track A crashed: {e}")
-        logger.debug(traceback.format_exc())
-        return 0
+        config = load_config(args.config)
+    except ConfigError as e:
+        print(f"error: {e}", file=sys.stderr)
+        return 2
 
+    log_file = setup_logging(to_file=not args.dry_run)
+    log = logging.getLogger("main")
 
-def run_track_b(config: dict, dry_run: bool) -> int:
-    logger = logging.getLogger("track_b")
-    logger.info("=" * 60)
-    logger.info("TRACK B — Big Tech Direct Career Pages Scraper")
-    logger.info("=" * 60)
-    try:
-        return scraper_bigtech.run(config, dry_run=dry_run)
-    except Exception as e:
-        logger.error(f"Track B crashed: {e}")
-        logger.debug(traceback.format_exc())
-        return 0
+    import ai_analyzer
+    import database
+    import emailer
+    import notifier
+    import report_generator
+    import role_matcher
+    import scraper_ats
 
-# ---------------------------------------------------------------------------
-# Entry point
-# ---------------------------------------------------------------------------
+    role_matcher.configure(config)
+    log.info(f"F-1 Job Hunter - {'DRY RUN' if args.dry_run else 'LIVE'} | track={args.track} "
+             f"| config={os.path.basename(config['_path'])}")
+    if log_file:
+        log.info(f"log file: {log_file}")
 
-def main():
-    parser = argparse.ArgumentParser(
-        description="F-1 Job Hunter Agent — daily automated job scraper for F-1 OPT holders"
-    )
-    parser.add_argument(
-        "--dry-run",
-        action="store_true",
-        help="Test mode: scrape job titles but skip AI analysis and DB writes",
-    )
-    parser.add_argument(
-        "--track",
-        choices=["a", "b", "both"],
-        default="both",
-        help="Which track to run (default: both)",
-    )
-    parser.add_argument(
-        "--report",
-        action="store_true",
-        help="Skip scraping — only regenerate today's reports from existing DB data",
-    )
-    parser.add_argument(
-        "--test-email",
-        action="store_true",
-        help="Send a test email to verify credentials (no scraping)",
-    )
-    args = parser.parse_args()
+    ai_cfg = config.get("ai", {}) or {}
+    if ai_cfg.get("enabled") and not args.dry_run and not ai_analyzer.is_ollama_running(
+            ai_cfg.get("ollama_url", ai_analyzer.DEFAULT_OLLAMA_URL)):
+        log.warning("ai.enabled is true but Ollama is not reachable - using keyword rules only "
+                    "(start it with `ollama serve`)")
 
-    log_file = setup_logging()
-    logger = logging.getLogger("main")
-    config = load_config()
-
-    logger.info("=" * 60)
-    logger.info("🏎️  F-1 JOB HUNTER AGENT — STARTING")
-    logger.info(f"   Run time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
-    logger.info(f"   Mode:     {'DRY RUN' if args.dry_run else 'LIVE'}")
-    logger.info(f"   Track:    {args.track.upper()}")
-    logger.info(f"   Log:      {log_file}")
-    logger.info("=" * 60)
-
-    # Initialize database
-    database.init_db()
-
-    # Pre-flight (skip in report-only mode or dry-run)
-    if not args.report and not args.dry_run:
-        if not preflight_checks(config):
-            logger.error("Pre-flight checks failed. Aborting.")
-            notifier.notify_error("Pre-flight checks failed. See logs.")
-            sys.exit(1)
-
-    # Test email mode — send sample email and exit
-    if getattr(args, 'test_email', False):
-        logger.info("Test email mode — sending sample digest...")
+    if args.test_email:
         ok = emailer.send_test_email(config)
-        if ok:
-            logger.info("✅ Test email sent! Check your inbox.")
-        else:
-            logger.error("❌ Test email failed — check .env credentials and config.yaml")
-        return
-
-    if args.report:
-        # Only regenerate reports
-        logger.info("Report-only mode — generating reports from DB...")
-        ats_path, bt_path = report_generator.generate_all(config)
-        logger.info(f"✅ ATS report:     {ats_path}")
-        logger.info(f"✅ Big Tech report: {bt_path}")
-        return
-
-    start_time = time.time()
-    ats_count = 0
-    bigtech_count = 0
-
-    if args.track in ("a", "both") and args.track in ("b", "both"):
-        # Run both tracks in parallel using a thread pool
-        with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
-            future_a = executor.submit(run_track_a, config, args.dry_run)
-            future_b = executor.submit(run_track_b, config, args.dry_run)
-
-            ats_count = future_a.result()
-            bigtech_count = future_b.result()
-    elif args.track == "a":
-        ats_count = run_track_a(config, args.dry_run)
-    elif args.track == "b":
-        bigtech_count = run_track_b(config, args.dry_run)
-
-    # Generate reports
-    logger.info("Generating Markdown reports...")
-    ats_path, bt_path = report_generator.generate_all(config)
-    logger.info(f"✅ ATS report:      {ats_path}")
-    logger.info(f"✅ Big Tech report:  {bt_path}")
+        return 0 if ok else 1
 
     if not args.dry_run:
-        # Pull today's YES jobs from DB for the email
-        ats_jobs = database.get_todays_yes_jobs("A")
-        bigtech_jobs = database.get_todays_yes_jobs("B")
+        database.init_db()
 
-        # Send email digest
+    if args.report:
+        ats_path, bt_path = report_generator.generate_all(config, args.since)
+        log.info(f"reports: {ats_path}, {bt_path}")
+        return 0
+
+    start = time.time()
+    ats = {"yes": 0, "found": []}
+    bt = {"yes": 0, "found": [], "results": {}}
+
+    if args.track in ("a", "both"):
+        try:
+            ats = scraper_ats.run(config, dry_run=args.dry_run, limit=args.limit)
+        except Exception as e:
+            log.error(f"Track A crashed: {type(e).__name__}: {e}")
+    if args.track in ("b", "both"):
+        try:
+            import scraper_bigtech
+            bt = scraper_bigtech.run(config, dry_run=args.dry_run, limit=args.limit, only=args.site)
+        except Exception as e:
+            log.error(f"Track B crashed: {type(e).__name__}: {e}")
+
+    if args.dry_run:
+        print("\nDRY RUN - matches (nothing was written):")
+        for j in ats.get("found", []) + bt.get("found", []):
+            print(f"  [T{j['tier']}] {j['title']} @ {j['company']} - {j['location']}\n        {j['url']}")
+        print(f"\nTotal matches: {len(ats.get('found', [])) + len(bt.get('found', []))}")
+        return 0
+
+    ats_path, bt_path = report_generator.generate_all(config, args.since, ats, bt)
+
+    if args.no_email:
+        log.info("email skipped (--no-email)")
+    else:
         emailer.send_digest(
-            ats_jobs=ats_jobs,
-            bigtech_jobs=bigtech_jobs,
-            ats_report_path=ats_path,
-            bigtech_report_path=bt_path,
-            config=config,
-        )
+            ats_jobs=database.get_new_yes_jobs("A", args.since),
+            bigtech_jobs=database.get_new_yes_jobs("B", args.since),
+            ats_report_path=ats_path, bigtech_report_path=bt_path, config=config)
 
-        # macOS notification
-        notifier.notify_run_complete(ats_count, bigtech_count, ats_path, bt_path)
+    if not args.no_notify:
+        notifier.notify_run_complete(ats.get("yes", 0), bt.get("yes", 0))
 
-    elapsed = round(time.time() - start_time, 1)
-    logger.info("=" * 60)
-    logger.info(f"🏁 DONE in {elapsed}s")
-    logger.info(f"   ATS jobs (YES):     {ats_count}")
-    logger.info(f"   Big Tech jobs (YES): {bigtech_count}")
-    logger.info(f"   Total:              {ats_count + bigtech_count}")
-    logger.info(f"   Reports in:         reports/")
-    logger.info("=" * 60)
+    log.info(f"DONE in {time.time() - start:.1f}s - new YES: Track A {ats.get('yes', 0)}, "
+             f"Track B {bt.get('yes', 0)}")
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

@@ -42,3 +42,6 @@ uploads/
 logs/
 reports/
 *.db
+
+# personal config (copy config.example.yaml -> config.yaml)
+config.yaml

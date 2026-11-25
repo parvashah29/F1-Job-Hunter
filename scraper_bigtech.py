@@ -9,14 +9,24 @@ import random
 import logging
 import re
 import os
+import urllib.robotparser
+from urllib.parse import urlparse
 from typing import Optional
 
-from playwright.sync_api import sync_playwright, Page, TimeoutError as PWTimeout
+try:  # Playwright is optional: Track A works without it
+    from playwright.sync_api import sync_playwright, Page, TimeoutError as PWTimeout
+    PLAYWRIGHT_OK = True
+except ImportError:  # pragma: no cover
+    sync_playwright = None
+    Page = object
+    PWTimeout = TimeoutError
+    PLAYWRIGHT_OK = False
 
 import database
 import ai_analyzer
 import role_matcher
 import location_filter
+from http_util import USER_AGENT
 
 logger = logging.getLogger(__name__)
 
@@ -336,156 +346,152 @@ EXTRACTOR_MAP = {
 # Main Track B runner
 # ---------------------------------------------------------------------------
 
-def run(config: dict, dry_run: bool = False) -> int:
-    """
-    Run Track B (Big Tech) scraper.
-    Returns count of new YES jobs found.
-    """
-    ai_model = config.get("ai", {}).get("model", "llama3.2")
-    ai_timeout = config.get("ai", {}).get("timeout_seconds", 45)
-    track_b_cfg = config.get("track_b", {})
-    companies = track_b_cfg.get("companies", [])
-    page_timeout = track_b_cfg.get("page_load_timeout", 30000)
-    min_delay = track_b_cfg.get("min_delay_seconds", 2)
-    max_delay = track_b_cfg.get("max_delay_seconds", 5)
-    max_per_co = track_b_cfg.get("max_jobs_per_company", 15)
+_robots_cache = {}
 
-    yes_count = 0
-    logger.info(f"[Track B] Starting — {len(companies)} Big Tech companies to scrape")
+
+def robots_allows(url: str) -> bool:
+    """Respect robots.txt for the search URL. If robots.txt is unreachable, allow (standard)."""
+    parts = urlparse(url)
+    origin = f"{parts.scheme}://{parts.netloc}"
+    rp = _robots_cache.get(origin)
+    if rp is None:
+        rp = urllib.robotparser.RobotFileParser()
+        try:
+            import requests
+            r = requests.get(origin + "/robots.txt", timeout=10, headers={"User-Agent": USER_AGENT})
+            if r.status_code == 200:
+                rp.parse(r.text.splitlines())
+            else:
+                rp.parse([])  # no robots.txt -> allow all
+        except Exception:
+            rp.parse([])
+        _robots_cache[origin] = rp
+    return rp.can_fetch(USER_AGENT, url)
+
+
+def run(config: dict, dry_run: bool = False, limit: int = None, only: list = None) -> dict:
+    """
+    Run Track B. Every site is isolated: a failure is logged and recorded in
+    stats['results'][site], never raised. `limit` caps jobs processed per site.
+    Sites with `enabled: false` in config are skipped; nothing here tries to evade bot
+    protection - a blocked site should be disabled instead.
+    """
+    cfg = config.get("track_b", {}) or {}
+    ai_cfg = config.get("ai", {}) or {}
+    page_timeout = cfg.get("page_load_timeout", 30000)
+    min_delay = cfg.get("min_delay_seconds", 2)
+    max_delay = cfg.get("max_delay_seconds", 5)
+    max_per_co = limit or cfg.get("max_jobs_per_company", 15)
+
+    stats = {"yes": 0, "no": 0, "processed": 0, "results": {}, "found": []}
+    companies = [c for c in cfg.get("companies", []) or []]
+    if only:
+        companies = [c for c in companies if c["name"].lower() in {o.lower() for o in only}]
+
+    if not PLAYWRIGHT_OK:
+        logger.error("[Track B] Playwright is not installed. Run: pip install playwright && "
+                     "playwright install chromium  (or use --track a)")
+        stats["error"] = "playwright-missing"
+        return stats
 
     with sync_playwright() as pw:
-        browser = pw.chromium.launch(headless=True)
-        context = browser.new_context(
-            user_agent=(
-                "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
-                "AppleWebKit/537.36 (KHTML, like Gecko) "
-                "Chrome/125.0.0.0 Safari/537.36"
-            ),
-            viewport={"width": 1440, "height": 900},
-        )
-
-        for company_cfg in companies:
-            name = company_cfg["name"]
-            search_url = company_cfg["search_url"]
-            base_url = company_cfg["base_url"]
-
-            # ── Each company gets its own fresh page ──────────────────────
-            # This prevents a redirect/error on one site from cascading into
-            # the next company's navigation (the bug that caused 0 jobs).
-            page = context.new_page()
-            page.set_default_timeout(page_timeout)
-
-            try:
-                logger.info(f"[Track B] Scraping {name}...")
-                try:
-                    page.goto(search_url, wait_until="domcontentloaded", timeout=page_timeout)
-                    _human_delay(min_delay, max_delay)
-                except PWTimeout:
-                    logger.warning(f"[Track B] {name}: Page load timed out — skipping")
+        try:
+            browser = pw.chromium.launch(headless=True)
+        except Exception as e:
+            logger.error(f"[Track B] Cannot launch Chromium ({type(e).__name__}). "
+                         "Run: playwright install chromium")
+            stats["error"] = "chromium-missing"
+            return stats
+        try:
+            context = browser.new_context(user_agent=USER_AGENT, viewport={"width": 1440, "height": 900})
+            for company_cfg in companies:
+                name = company_cfg["name"]
+                if not company_cfg.get("enabled", True):
+                    stats["results"][name] = "disabled in config" + (
+                        f" ({company_cfg['disabled_reason']})" if company_cfg.get("disabled_reason") else "")
+                    logger.info(f"[Track B] {name}: disabled in config - skipping")
                     continue
-                except Exception as e:
-                    logger.error(f"[Track B] {name}: Navigation error — {e}")
-                    continue
-
-                # Use company-specific extractor if available, else fallback
-                extractor = EXTRACTOR_MAP.get(name, lambda pg, bu: _extract_generic(pg, name, bu))
                 try:
-                    job_listings = extractor(page, base_url)
-                except Exception as e:
-                    logger.error(f"[Track B] {name}: Extractor error — {e}")
-                    job_listings = []
+                    stats["results"][name] = _scrape_site(
+                        context, company_cfg, ai_cfg, dry_run, stats,
+                        page_timeout, min_delay, max_delay, max_per_co)
+                except Exception as e:  # isolate every site
+                    stats["results"][name] = f"error: {type(e).__name__}"
+                    logger.error(f"[Track B] {name}: failed - {type(e).__name__}: {e}")
+                _human_delay(min_delay, max_delay)
+        finally:
+            browser.close()
 
-                logger.info(f"[Track B] {name} — {len(job_listings)} job listings found")
+    logger.info(f"[Track B] Done - YES: {stats['yes']}, NO: {stats['no']}")
+    return stats
 
-                processed = 0
-                for job in job_listings:
-                    if processed >= max_per_co:
-                        break
 
-                    title = job.get("title", "").strip()
-                    url = job.get("url", "").strip()
-                    raw_location = job.get("location", "")
+def _scrape_site(context, company_cfg, ai_cfg, dry_run, stats,
+                 page_timeout, min_delay, max_delay, max_per_co) -> str:
+    """Scrape one site. Returns a short human-readable status string."""
+    name = company_cfg["name"]
+    search_url = company_cfg["search_url"]
+    base_url = company_cfg["base_url"]
 
-                    if not title or not url:
-                        continue
+    if not robots_allows(search_url):
+        logger.warning(f"[Track B] {name}: robots.txt disallows {search_url} - skipping")
+        return "skipped (robots.txt disallows)"
 
-                    # Pre-filter by role keyword
-                    tier = role_matcher.classify_tier(title)
-                    if tier is None:
-                        continue
+    page = context.new_page()
+    page.set_default_timeout(page_timeout)
+    try:
+        logger.info(f"[Track B] Scraping {name}...")
+        try:
+            page.goto(search_url, wait_until="domcontentloaded", timeout=page_timeout)
+        except PWTimeout:
+            logger.warning(f"[Track B] {name}: page load timed out")
+            return "failed: page load timed out"
+        except Exception as e:
+            logger.error(f"[Track B] {name}: navigation error - {type(e).__name__}")
+            return f"failed: navigation error ({type(e).__name__})"
+        _human_delay(min_delay, max_delay)
 
-                    # Location filter
-                    if not location_filter.is_us_or_remote(raw_location):
-                        logger.debug(f"  ⏭️  Skipped (non-US): {title} @ {name}")
-                        continue
+        extractor = EXTRACTOR_MAP.get(name) or (lambda pg, bu: _extract_generic(pg, name, bu))
+        listings = extractor(page, base_url)
+        logger.info(f"[Track B] {name} - {len(listings)} job listings found")
+        if not listings:
+            return "0 listings (blocked, layout changed, or empty results)"
 
-                    # Dedup check
-                    if database.is_seen(url):
-                        continue
-
-                    # Fetch full description
-                    description = "" if dry_run else _get_job_description(page, url)
-                    _human_delay(min_delay, max_delay)
-
-                    # YOE pre-filter
-                    if not dry_run and ai_analyzer.check_yoe_in_description(description):
-                        logger.info(f"  ⏭️  [YOE] Skipped: {title} @ {name}")
-                        database.save_job({
-                            "url": url, "title": title, "company": name,
-                            "location": location_filter.clean_location(raw_location),
-                            "track": "B", "tier": tier, "ai_verdict": "NO",
-                        })
-                        continue
-
-                    verdict = "YES" if dry_run else ai_analyzer.analyze_job(
-                        description, model=ai_model, timeout=ai_timeout
-                    )
-
-                    job_record = {
-                        "url": url,
-                        "title": title,
-                        "company": name,
-                        "location": location_filter.clean_location(raw_location),
-                        "track": "B",
-                        "tier": tier,
-                        "ai_verdict": verdict,
-                    }
-
-                    if not dry_run:
-                        database.save_job(job_record)
-
-                    if verdict == "YES":
-                        yes_count += 1
-                        logger.info(f"  ✅ [T{tier}] {title} @ {name}")
-                    else:
-                        logger.info(f"  ❌ [T{tier}] {title} @ {name} — Filtered")
-
-                    processed += 1
-
-                    # Navigate back to search results for next job
-                    try:
-                        page.go_back(wait_until="domcontentloaded", timeout=10000)
-                        _human_delay(1, 2)
-                    except Exception:
-                        try:
-                            page.goto(search_url, wait_until="domcontentloaded", timeout=page_timeout)
-                            _human_delay(min_delay, max_delay)
-                        except Exception:
-                            break
-
-            finally:
-                # Always close this company's page — even on error — so the
-                # next company starts with a clean slate
-                try:
-                    page.close()
-                except Exception:
-                    pass
-
-            # Cooldown between companies
-            _human_delay(min_delay + 1, max_delay + 2)
-
-        context.close()
-        browser.close()
-
-    logger.info(f"[Track B] Done — YES: {yes_count}")
-    return yes_count
+        processed = 0
+        for job in listings:
+            if processed >= max_per_co:
+                break
+            title = re.sub(r"\s+", " ", job["title"]).strip()
+            url, raw_loc = job["url"].strip(), job.get("location", "")
+            if len(title) > 140 or re.match(r"(?i)^(apply|view|learn more|read more|see all)", title):
+                continue
+            tier = role_matcher.classify_tier(title)
+            if tier is None or not location_filter.is_us_or_remote(raw_loc):
+                continue
+            existing = None if dry_run else database.get_job(url)
+            if existing and existing.get("reason") is not None and existing["title"] == title:
+                database.touch_job(url)
+                continue
+            description = "" if dry_run else _get_job_description(page, url)
+            _human_delay(min_delay, max_delay)
+            verdict, reason = ai_analyzer.decide(description, ai_cfg, use_llm=not dry_run)
+            record = {"url": url, "title": title, "company": name,
+                      "location": location_filter.clean_location(raw_loc),
+                      "track": "B", "tier": tier, "ai_verdict": verdict, "reason": reason}
+            if not dry_run:
+                database.save_job(record)
+            processed += 1
+            stats["processed"] += 1
+            if verdict == "YES":
+                stats["yes"] += 1
+                stats["found"].append(record)
+                logger.info(f"  [YES][T{tier}] {title} @ {name} ({reason})")
+            else:
+                stats["no"] += 1
+                logger.info(f"  [NO ][T{tier}] {title} @ {name} ({reason})")
+        return f"ok: {len(listings)} listings, {processed} evaluated"
+    finally:
+        try:
+            page.close()
+        except Exception:
+            pass

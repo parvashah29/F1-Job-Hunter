@@ -5,7 +5,12 @@
 
 # ----- AI Settings -----
 ai:
+  # Optional local-LLM second opinion (Ollama). Rule-based visa/clearance/YOE
+  # filtering always runs; the LLM can only ADD rejections. Small models were
+  # observed to reject nearly everything, so this is OFF by default.
+  enabled: false
   model: "llama3.2"          # Change to "mistral" for deeper analysis
+  ollama_url: "http://localhost:11434"
   timeout_seconds: 45
   max_description_chars: 4000  # Truncate long JDs before sending to LLM
 
@@ -16,11 +21,11 @@ schedule_time: "19:00"  # 7:00 PM daily
 # Credentials are loaded from .env (never store passwords here)
 # See README for Gmail App Password setup instructions
 email:
-  enabled: true
+  enabled: false              # set true after filling .env and recipient_email
   smtp_host: "smtp.gmail.com"
   smtp_port: 587
   # sender_email and app_password come from .env file
-  recipient_email: "sparva078@gmail.com"         # ← Fill in: your email address (can be same as sender)
+  recipient_email: ""   # your address; leave empty to disable sending
   subject_template: "🔥 F-1 Job Digest — {date} | {total} new jobs ({ats} ATS · {bigtech} BigTech)"
   include_attachments: true   # Attach the raw .md files as well
   include_bigtech: true       # Include Track B section in the email
@@ -29,10 +34,8 @@ email:
 
 # ----- Your Profile (used to personalize AI prompt) -----
 profile:
-  graduation_year: 2027
-  graduation_month: "May"
+  graduation_year: 2027       # used in the optional LLM prompt only
   status: "F-1 OPT"
-  degree: "Master's"          # or "Bachelor's" — adjust as needed
 
 # ----- Role Keywords by Tier -----
 # Used for title-based pre-filtering before AI analysis
@@ -137,7 +140,7 @@ search_queries:
 
 # ----- Track A: ATS/Aggregator Scraper (Greenhouse & Lever JSON APIs) -----
 track_a:
-  # Companies using Greenhouse ATS — verified live as of July 2026
+  # Companies using Greenhouse ATS (a slug that 404s is logged and skipped)
   # API: https://boards-api.greenhouse.io/v1/boards/{slug}/jobs
   greenhouse_companies:
     # ── Big AI Labs ──────────────────────────────────────────────────────
@@ -152,7 +155,6 @@ track_a:
     - { slug: "airbnb",       name: "Airbnb" }
     - { slug: "coinbase",     name: "Coinbase" }
     - { slug: "discord",      name: "Discord" }
-    - { slug: "doordash",     name: "DoorDash" }
     - { slug: "duolingo",     name: "Duolingo" }
     - { slug: "roblox",       name: "Roblox" }           # 229 jobs
     - { slug: "twitch",       name: "Twitch" }
@@ -161,7 +163,6 @@ track_a:
     - { slug: "robinhood",    name: "Robinhood" }
     # ── Dev Tools / Infra ────────────────────────────────────────────
     - { slug: "figma",        name: "Figma" }
-    - { slug: "notion",       name: "Notion" }
     - { slug: "vercel",       name: "Vercel" }           # 71 jobs
     - { slug: "airtable",     name: "Airtable" }
     - { slug: "contentful",   name: "Contentful" }
@@ -172,10 +173,7 @@ track_a:
     - { slug: "cloudflare",   name: "Cloudflare" }
     - { slug: "pagerduty",    name: "PagerDuty" }
     # ── SaaS / Enterprise ────────────────────────────────────────────
-    - { slug: "hubspot",      name: "HubSpot" }
     - { slug: "intercom",     name: "Intercom" }
-    - { slug: "zendesk",      name: "Zendesk" }         # verify if broken
-    - { slug: "zoom",         name: "Zoom" }            # verify if broken
     - { slug: "twilio",       name: "Twilio" }
     - { slug: "asana",        name: "Asana" }
     - { slug: "gusto",        name: "Gusto" }
@@ -185,56 +183,53 @@ track_a:
     - { slug: "checkr",       name: "Checkr" }
     # ── Data / DB ────────────────────────────────────────────────────
     - { slug: "mongodb",      name: "MongoDB" }
-    - { slug: "snowflake",    name: "Snowflake" }        # verify if broken
-    - { slug: "amplitude",    name: "Amplitude" }
-    - { slug: "segment",      name: "Segment" }          # verify if broken
     - { slug: "coreweave",    name: "CoreWeave" }        # 283 jobs ✅
     - { slug: "fivetran",     name: "Fivetran" }         # 172 jobs ✅
-    - { slug: "clickhouse",   name: "ClickHouse" }       # 172 jobs ✅
     - { slug: "starburst",    name: "Starburst" }        # 15 jobs ✅
     - { slug: "dremio",       name: "Dremio" }           # 6 jobs ✅
     - { slug: "labelbox",     name: "Labelbox" }         # 14 jobs ✅
     # ── Fintech ──────────────────────────────────────────────────────
     - { slug: "stripe",       name: "Stripe" }
-    - { slug: "plaid",        name: "Plaid" }            # verify if broken
     - { slug: "brex",         name: "Brex" }
     - { slug: "carta",        name: "Carta" }
-    - { slug: "rippling",     name: "Rippling" }         # verify if broken
     - { slug: "toast",        name: "Toast" }            # 298 jobs ✅
-    - { slug: "marqeta",      name: "Marqeta" }          # 40 jobs ✅
     # ── Biotech / Other ──────────────────────────────────────────────
-    - { slug: "benchling",    name: "Benchling" }        # verify if broken
     - { slug: "chime",        name: "Chime" }
-    - { slug: "palantir",     name: "Palantir" }         # verify if broken
     - { slug: "okta",         name: "Okta" }
     - { slug: "rubrik",       name: "Rubrik" }
 
-  # Companies using Lever ATS — verified live slugs only
+  # Companies using Lever ATS
   # API: https://api.lever.co/v0/postings/{slug}?mode=json
-  lever_companies:
-    - { slug: "anyscale",     name: "Anyscale" }
-
-  max_jobs_per_company: 10
+  lever_companies: []   # e.g. - { slug: "company", name: "Company" }  (slug must be live)
+  request_delay_seconds: 1.0   # pause between boards (polite)
 
 # ----- Track B: Big Tech Direct Career Pages (Playwright) -----
 track_b:
   companies:
     - name: "Meta"
+      enabled: false
+      disabled_reason: "JS-rendered; listings never appeared in headless Chromium (timeout) (checked 2026-11-24)"
       base_url: "https://www.metacareers.com"
       search_url: "https://www.metacareers.com/jobs/?q=university+graduate+data+scientist&offices[0]=United+States"
       type: "playwright"
 
     - name: "Amazon"
+      enabled: false
+      disabled_reason: "listings never appeared in headless Chromium (timeout); selectors stale (checked 2026-11-24)"
       base_url: "https://www.amazon.jobs"
       search_url: "https://www.amazon.jobs/en/search?base_query=new+grad+data+scientist&loc_query=United+States&sort=relevant"
       type: "playwright"
 
     - name: "Google"
+      enabled: false
+      disabled_reason: "obfuscated markup / no listings found; selectors stale (checked 2026-11-24)"
       base_url: "https://careers.google.com"
       search_url: "https://careers.google.com/jobs/results/?q=university+graduate+data+scientist&location=United+States"
       type: "playwright"
 
     - name: "Microsoft"
+      enabled: false
+      disabled_reason: "jobs.microsoft.com no longer resolves; careers site moved (checked 2026-11-24)"
       base_url: "https://jobs.microsoft.com"
       search_url: "https://jobs.microsoft.com/us/en/search?keywords=data+scientist+new+grad&experience=University+Graduates"
       type: "playwright"
@@ -260,6 +255,8 @@ track_b:
       type: "playwright"
 
     - name: "Salesforce"
+      enabled: false
+      disabled_reason: "extractor found 0 listings (checked 2026-11-24)"
       base_url: "https://careers.salesforce.com"
       search_url: "https://careers.salesforce.com/en/jobs/?search=data+scientist+new+grad&country=United+States"
       type: "playwright"

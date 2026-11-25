@@ -1,56 +1,41 @@
-"""
-notifier.py — macOS desktop notification sender for F-1 Job Hunter Agent
-Uses osascript (AppleScript) — no third-party libraries required.
-"""
+"""notifier.py - optional macOS desktop notification via osascript; a silent no-op elsewhere."""
 
-import subprocess
 import logging
+import subprocess
+import sys
 
 logger = logging.getLogger(__name__)
 
 
-def send_notification(title: str, message: str, subtitle: str = ""):
-    """
-    Send a macOS desktop notification via osascript.
-    Falls back to terminal print if osascript is unavailable.
-    """
+def _as_escape(text: str) -> str:
+    """Escape for an AppleScript double-quoted string (prevents script injection from job data)."""
+    return (text or "").replace("\\", "\\\\").replace('"', '\\"').replace("\n", " ")
+
+
+def send_notification(title: str, message: str, subtitle: str = "") -> bool:
+    """Returns True if a notification was sent. No-op (False) when not on macOS."""
+    if sys.platform != "darwin":
+        logger.debug("[Notifier] not macOS - skipping notification")
+        return False
+    script = f'display notification "{_as_escape(message)}" with title "{_as_escape(title)}"'
+    if subtitle:
+        script += f' subtitle "{_as_escape(subtitle)}"'
     try:
-        subtitle_part = f'subtitle "{subtitle}"' if subtitle else ""
-        script = (
-            f'display notification "{message}" '
-            f'with title "{title}" '
-            f'{subtitle_part}'
-        )
-        subprocess.run(["osascript", "-e", script], check=True, capture_output=True)
-        logger.info(f"[Notifier] Sent: {title} — {message}")
-    except subprocess.CalledProcessError as e:
-        logger.warning(f"[Notifier] osascript failed: {e}")
-        _fallback_print(title, message)
-    except FileNotFoundError:
-        logger.warning("[Notifier] osascript not found — not running on macOS?")
-        _fallback_print(title, message)
+        subprocess.run(["osascript", "-e", script], check=True, capture_output=True, timeout=10)
+        return True
+    except (subprocess.SubprocessError, FileNotFoundError, OSError) as e:
+        logger.warning(f"[Notifier] notification failed: {type(e).__name__}")
+        return False
 
 
-def _fallback_print(title: str, message: str):
-    print(f"\n{'=' * 50}")
-    print(f"📢 {title}")
-    print(f"   {message}")
-    print(f"{'=' * 50}\n")
-
-
-def notify_run_complete(ats_count: int, bigtech_count: int, ats_path: str, bigtech_path: str):
-    """Send the end-of-run summary notification."""
+def notify_run_complete(ats_count: int, bigtech_count: int, *_ignored) -> bool:
     total = ats_count + bigtech_count
-    title = "🔥 F-1 Job Hunter — Reports Ready!"
-    message = f"{total} new jobs: {ats_count} from ATS, {bigtech_count} from Big Tech"
-    subtitle = "Open reports/ folder to review"
-    send_notification(title, message, subtitle)
-
-
-def notify_error(error_msg: str):
-    """Send an error notification."""
-    send_notification(
-        title="⚠️ F-1 Job Hunter — Error",
-        message=error_msg[:100],
-        subtitle="Check logs/ for details",
+    return send_notification(
+        "F-1 Job Hunter - run complete",
+        f"{total} new jobs: {ats_count} ATS, {bigtech_count} Big Tech",
+        "Open the reports/ folder",
     )
+
+
+def notify_error(error_msg: str) -> bool:
+    return send_notification("F-1 Job Hunter - error", error_msg[:100], "Check logs/")

@@ -1,3 +1,5 @@
+> **Note:** this is the original product brief. The implementation has since changed: Track A uses the Greenhouse/Lever JSON APIs (no Playwright), eligibility is rule-based with an optional LLM, and Track B is best-effort. See README.md for current behaviour.
+
 # Product Requirements Document (PRD): F-1 Job Hunter Agent
 
 ## 1. Project Overview
